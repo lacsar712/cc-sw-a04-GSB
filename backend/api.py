@@ -27,10 +27,18 @@ CREATE TABLE IF NOT EXISTS jobs (
     status text NOT NULL,
     verdict text NOT NULL DEFAULT '',
     reason text NOT NULL DEFAULT '',
+    urgent boolean NOT NULL DEFAULT false,
     created_by text NOT NULL,
     created_at timestamptz NOT NULL
 );
 """
+
+# 急测记号随单冻结：仅在校准员提交那一刻写入，之后不可修改
+MIGRATIONS = (
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS urgent boolean NOT NULL DEFAULT false",
+)
+
+JOB_COLUMNS = "id, lamp, nominal_nm, measured_nm, status, verdict, reason, urgent, created_by"
 
 
 def connect():
@@ -46,6 +54,7 @@ class JobIn(BaseModel):
     lamp: str
     nominal_nm: float
     measured_nm: float
+    urgent: bool = False
 
 
 def user_from_request(request: Request) -> dict:
@@ -88,7 +97,7 @@ async def list_jobs(request: Request) -> list:
     user_from_request(request)
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, lamp, nominal_nm, measured_nm, status, verdict, reason, created_by FROM jobs ORDER BY id DESC"
+            f"SELECT {JOB_COLUMNS} FROM jobs ORDER BY id DESC"
         ).fetchall()
         return list(rows)
 
@@ -98,12 +107,38 @@ async def get_job(request: Request, job_id: int) -> dict:
     user_from_request(request)
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, lamp, nominal_nm, measured_nm, status, verdict, reason, created_by FROM jobs WHERE id = %s",
+            f"SELECT {JOB_COLUMNS} FROM jobs WHERE id = %s",
             (job_id,),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="任务不存在")
         return dict(row)
+
+
+@get("/api/lane")
+async def lane_overview(request: Request) -> dict:
+    """急测插队车道总览：急测队、普通队与下一笔将领并排展示。"""
+    user_from_request(request)
+    with connect() as conn:
+        urgent_rows = conn.execute(
+            f"SELECT {JOB_COLUMNS} FROM jobs WHERE status='pending' AND urgent ORDER BY id"
+        ).fetchall()
+        normal_rows = conn.execute(
+            f"SELECT {JOB_COLUMNS} FROM jobs WHERE status='pending' AND NOT urgent ORDER BY id"
+        ).fetchall()
+        next_row = conn.execute(
+            f"""
+            SELECT {JOB_COLUMNS} FROM jobs
+            WHERE status='pending'
+            ORDER BY CASE WHEN urgent THEN 0 ELSE 1 END, id
+            LIMIT 1
+            """
+        ).fetchone()
+        return {
+            "urgent_queue": list(urgent_rows),
+            "normal_queue": list(normal_rows),
+            "next_job": dict(next_row) if next_row else None,
+        }
 
 
 @post("/api/jobs")
@@ -114,31 +149,43 @@ async def create_job(request: Request, data: JobIn) -> dict:
     with connect() as conn:
         row = conn.execute(
             """
-            INSERT INTO jobs(lamp, nominal_nm, measured_nm, status, verdict, reason, created_by, created_at)
-            VALUES (%s,%s,%s,'pending','','',%s,%s) RETURNING id
+            INSERT INTO jobs(lamp, nominal_nm, measured_nm, status, verdict, reason, urgent, created_by, created_at)
+            VALUES (%s,%s,%s,'pending','','',%s,%s,%s) RETURNING id, urgent
             """,
-            (data.lamp.strip(), data.nominal_nm, data.measured_nm, user["username"], datetime.now(timezone.utc)),
+            (
+                data.lamp.strip(),
+                data.nominal_nm,
+                data.measured_nm,
+                data.urgent,
+                user["username"],
+                datetime.now(timezone.utc),
+            ),
         ).fetchone()
         conn.commit()
-        return {"id": row["id"], "status": "pending"}
+        return {"id": row["id"], "status": "pending", "urgent": row["urgent"]}
 
 
 def on_startup() -> None:
     with connect() as conn:
         conn.execute(SCHEMA)
+        for stmt in MIGRATIONS:
+            conn.execute(stmt)
         n = conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"]
         if n == 0:
             now = datetime.now(timezone.utc)
             conn.execute(
                 """
-                INSERT INTO jobs(lamp, nominal_nm, measured_nm, status, verdict, reason, created_by, created_at)
+                INSERT INTO jobs(lamp, nominal_nm, measured_nm, status, verdict, reason, urgent, created_by, created_at)
                 VALUES
-                ('氦灯-587', 587.56, 587.50, 'done', '合格', '偏差 0.0600 nm 在允差内', 'seed', %s),
-                ('汞灯-546', 546.07, 546.30, 'done', '超差', '偏差 0.2300 nm 超过允差 0.08', 'seed', %s)
+                ('氦灯-587', 587.56, 587.50, 'done', '合格', '偏差 0.0600 nm 在允差内', false, 'seed', %s),
+                ('汞灯-546', 546.07, 546.30, 'done', '超差', '偏差 0.2300 nm 超过允差 0.08', false, 'seed', %s)
                 """,
                 (now, now),
             )
         conn.commit()
 
 
-app = Litestar(route_handlers=[health, login, list_jobs, get_job, create_job], on_startup=[on_startup])
+app = Litestar(
+    route_handlers=[health, login, list_jobs, get_job, lane_overview, create_job],
+    on_startup=[on_startup],
+)

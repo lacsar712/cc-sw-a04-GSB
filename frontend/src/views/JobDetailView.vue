@@ -36,6 +36,13 @@ watch(() => route.params.id, load)
       <p>状态：{{ job.status }}</p>
       <p>结论：{{ job.verdict }}</p>
       <p>理由：{{ job.reason }}</p>
+      <p>急测记号：<strong :class="job.urgent ? 'urgent-mark' : ''">{{ job.urgent ? '急测（提交时随单冻结）' : '普通' }}</strong></p>
     </section>
   </div>
 </template>
+
+<style scoped>
+.urgent-mark {
+  color: #c0392b;
+}
+</style>

@@ -15,11 +15,12 @@ def connect():
 
 
 def claim_one(conn):
+    # 领取侧：先清空急测待处理，再碰普通；同档编号升序
     row = conn.execute(
         """
-        SELECT id, nominal_nm, measured_nm FROM jobs
+        SELECT id, nominal_nm, measured_nm, urgent FROM jobs
         WHERE status='pending'
-        ORDER BY id
+        ORDER BY CASE WHEN urgent THEN 0 ELSE 1 END, id
         FOR UPDATE SKIP LOCKED
         LIMIT 1
         """
@@ -32,6 +33,8 @@ def claim_one(conn):
         (verdict, reason, row["id"]),
     )
     conn.commit()
+    lane = "急测" if row["urgent"] else "普通"
+    print(f"claimed job {row['id']} via {lane} lane -> {verdict}", flush=True)
     return row["id"]
 
 
