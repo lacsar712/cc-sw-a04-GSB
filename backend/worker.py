@@ -19,7 +19,7 @@ def claim_one(conn):
         """
         SELECT id, nominal_nm, measured_nm FROM jobs
         WHERE status='pending'
-        ORDER BY id
+        ORDER BY urgent DESC, id
         FOR UPDATE SKIP LOCKED
         LIMIT 1
         """

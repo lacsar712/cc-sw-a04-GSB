@@ -31,6 +31,7 @@ watch(() => route.params.id, load)
     <section v-if="job" style="margin:16px 0; padding:12px; border:1px solid #ccc;">
       <h3>任务详情 #{{ job.id }}</h3>
       <p>灯种：{{ job.lamp }}</p>
+      <p>急测：{{ job.urgent ? '急测' : '普通' }}</p>
       <p>标称 nm：{{ job.nominal_nm }}</p>
       <p>实测 nm：{{ job.measured_nm }}</p>
       <p>状态：{{ job.status }}</p>

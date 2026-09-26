@@ -27,9 +27,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     status text NOT NULL,
     verdict text NOT NULL DEFAULT '',
     reason text NOT NULL DEFAULT '',
+    urgent boolean NOT NULL DEFAULT false,
     created_by text NOT NULL,
     created_at timestamptz NOT NULL
 );
+"""
+
+MIGRATIONS = """
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS urgent boolean NOT NULL DEFAULT false;
 """
 
 
@@ -46,6 +51,7 @@ class JobIn(BaseModel):
     lamp: str
     nominal_nm: float
     measured_nm: float
+    urgent: bool = False
 
 
 def user_from_request(request: Request) -> dict:
@@ -88,9 +94,25 @@ async def list_jobs(request: Request) -> list:
     user_from_request(request)
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, lamp, nominal_nm, measured_nm, status, verdict, reason, created_by FROM jobs ORDER BY id DESC"
+            "SELECT id, lamp, nominal_nm, measured_nm, status, verdict, reason, urgent, created_by FROM jobs ORDER BY id DESC"
         ).fetchall()
         return list(rows)
+
+
+@get("/api/lanes")
+async def lanes(request: Request) -> dict:
+    user_from_request(request)
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, lamp, nominal_nm, measured_nm, urgent, created_by
+            FROM jobs WHERE status='pending' ORDER BY id
+            """
+        ).fetchall()
+        rush = [dict(r) for r in rows if r["urgent"]]
+        normal = [dict(r) for r in rows if not r["urgent"]]
+        nxt = rush[0] if rush else (normal[0] if normal else None)
+        return {"rush": rush, "normal": normal, "next": nxt}
 
 
 @get("/api/jobs/{job_id:int}")
@@ -98,7 +120,7 @@ async def get_job(request: Request, job_id: int) -> dict:
     user_from_request(request)
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, lamp, nominal_nm, measured_nm, status, verdict, reason, created_by FROM jobs WHERE id = %s",
+            "SELECT id, lamp, nominal_nm, measured_nm, status, verdict, reason, urgent, created_by FROM jobs WHERE id = %s",
             (job_id,),
         ).fetchone()
         if not row:
@@ -114,18 +136,19 @@ async def create_job(request: Request, data: JobIn) -> dict:
     with connect() as conn:
         row = conn.execute(
             """
-            INSERT INTO jobs(lamp, nominal_nm, measured_nm, status, verdict, reason, created_by, created_at)
-            VALUES (%s,%s,%s,'pending','','',%s,%s) RETURNING id
+            INSERT INTO jobs(lamp, nominal_nm, measured_nm, status, verdict, reason, urgent, created_by, created_at)
+            VALUES (%s,%s,%s,'pending','','',%s,%s,%s) RETURNING id
             """,
-            (data.lamp.strip(), data.nominal_nm, data.measured_nm, user["username"], datetime.now(timezone.utc)),
+            (data.lamp.strip(), data.nominal_nm, data.measured_nm, data.urgent, user["username"], datetime.now(timezone.utc)),
         ).fetchone()
         conn.commit()
-        return {"id": row["id"], "status": "pending"}
+        return {"id": row["id"], "status": "pending", "urgent": data.urgent}
 
 
 def on_startup() -> None:
     with connect() as conn:
         conn.execute(SCHEMA)
+        conn.execute(MIGRATIONS)
         n = conn.execute("SELECT COUNT(*) AS n FROM jobs").fetchone()["n"]
         if n == 0:
             now = datetime.now(timezone.utc)
@@ -141,4 +164,4 @@ def on_startup() -> None:
         conn.commit()
 
 
-app = Litestar(route_handlers=[health, login, list_jobs, get_job, create_job], on_startup=[on_startup])
+app = Litestar(route_handlers=[health, login, list_jobs, lanes, get_job, create_job], on_startup=[on_startup])
